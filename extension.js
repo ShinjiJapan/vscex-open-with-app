@@ -458,7 +458,17 @@ async function pickApplication(extKey) {
 
 /** コマンド引数から対象URI配列を取り出す */
 function resolveUris(uri, uris) {
-  if (Array.isArray(uris) && uris.length > 0) return uris;
+  // エクスプローラ右クリックでは uri=クリックしたファイル、uris=選択範囲 が渡る。
+  // ただし explorer.autoReveal によりアクティブエディタのファイルが自動選択されていると、
+  // 別のファイルを右クリックしても uris は元のまま（クリックした uri を含まない）ことがある。
+  // その場合に uris を優先すると「何を右クリックしても同じファイルが開く」不具合になるため、
+  // クリックした uri が選択範囲に含まれないときはクリックしたファイルだけを対象にする。
+  if (Array.isArray(uris) && uris.length > 0) {
+    if (uri && !uris.some((u) => u.toString() === uri.toString())) {
+      return [uri];
+    }
+    return uris;
+  }
   if (uri) return [uri];
   const active = vscode.window.activeTextEditor;
   return active ? [active.document.uri] : [];
