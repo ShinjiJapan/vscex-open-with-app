@@ -169,30 +169,11 @@ public static class StoreLauncher {
     }
 }
 '@
-# Get-StartApps の一覧にはデスクトップアプリも含まれる。それらは UWP の
-# アクティベーション API では起動できず ArgumentException になる。AppsFolder から
-# 実行ファイルのパスを解決できればそのまま起動し、無ければ UWP として起動する。
-function Resolve-AppExe([string]$appId) {
-  try {
-    $shell = New-Object -ComObject Shell.Application
-    $item = $shell.NameSpace('shell:AppsFolder').Items() | Where-Object { $_.Path -eq $appId } | Select-Object -First 1
-    if ($item) {
-      $target = $item.ExtendedProperty('System.Link.TargetParsingPath')
-      if ($target -and (Test-Path -LiteralPath $target -PathType Leaf)) { return $target }
-    }
-  } catch {}
-  return $null
-}
+# このスクリプトはパッケージ（UWP/ストア）アプリ専用。
+# デスクトップアプリは拡張機能側で実行ファイルを解決して起動するため、ここには来ない。
 try {
-  $exe = Resolve-AppExe $Aumid
-  if ($exe) {
-    # デスクトップアプリ: 実行ファイルにパスを渡して起動
-    Start-Process -FilePath $exe -ArgumentList ('"' + $FilePath + '"')
-  } else {
-    # パッケージ（UWP/ストア）アプリ: 専用 API でファイルを渡して起動
-    Add-Type -TypeDefinition $source -Language CSharp
-    [StoreLauncher]::Open($Aumid, $FilePath) | Out-Null
-  }
+  Add-Type -TypeDefinition $source -Language CSharp
+  [StoreLauncher]::Open($Aumid, $FilePath) | Out-Null
 } catch {
   # .NET 例外（COM の ArgumentException など）はネストしているので一番内側を表示する
   $ex = $_.Exception
@@ -207,13 +188,101 @@ try {
   return scriptPath;
 }
 
-/** 実行ファイル（exe 等）でファイルを起動 */
-function launchExe(appPath, filePath) {
-  const child = cp.spawn(appPath, [filePath], { detached: true, stdio: 'ignore' });
+/**
+ * 子プロセス用に「掃除した」環境変数を返す。
+ * 拡張機能ホスト（VSCode 本体）は ELECTRON_RUN_AS_NODE や VSCODE_* を設定しており、
+ * これをそのまま継承すると Electron 製アプリが GUI ではなく Node として起動してしまう
+ * （= 何も表示されない）。これらを取り除いて、通常のシェルから起動したのと同じ状態にする。
+ */
+function sanitizedEnv() {
+  const env = {};
+  for (const key of Object.keys(process.env)) {
+    if (key === 'ELECTRON_RUN_AS_NODE' || key.startsWith('VSCODE_')) continue;
+    env[key] = process.env[key];
+  }
+  return env;
+}
+
+/**
+ * 実行ファイルが VSCode 系（VSCode / VSCodium / Cursor など Electron 製エディタ）なら、
+ * 同梱の CLI 本体 cli.js のパスを返す。これらは Code.exe を直接たたいてもフォルダーを
+ * 開けず、cli.js 経由（= bin\code.cmd と同じ起動方法）でないと正しく開けない。
+ */
+function findVscodeCliJs(appPath) {
+  const dir = path.dirname(appPath);
+  const binDir = path.join(dir, 'bin');
+  let binEntries;
+  try {
+    binEntries = fs.readdirSync(binDir);
+  } catch {
+    binEntries = undefined; // bin フォルダーが無い（＝ほとんどの非 VSCode アプリ）
+  }
+
+  // 1) 公式 CLI ランチャー bin\*.cmd は cli.js の正確なパスを内部に持っている。
+  //    インストール形態（フラット/コミットハッシュ配下）に依存せず最も確実なので最優先で読む。
+  //    例: "%~dp0..\<...>\resources\app\out\cli.js"（%~dp0 は bin\、.. でインストール直下）
+  if (binEntries) {
+    for (const name of binEntries) {
+      if (!/\.cmd$/i.test(name)) continue;
+      try {
+        const text = fs.readFileSync(path.join(binDir, name), 'utf8');
+        const m = text.match(/%~dp0\.\.[\\/]([^"]*cli\.js)/i);
+        if (m) {
+          const cli = path.join(dir, m[1].replace(/\//g, '\\'));
+          if (fs.existsSync(cli)) return cli;
+        }
+      } catch {
+        // この .cmd は読めなかった。次へ。
+      }
+    }
+  }
+
+  // 2) フラット配置（古い VSCode など）: <dir>\resources\app\out\cli.js
+  const flat = path.join(dir, 'resources', 'app', 'out', 'cli.js');
+  if (fs.existsSync(flat)) return flat;
+
+  // 3) コミットハッシュ配下: <dir>\<hash>\resources\app\out\cli.js。
+  //    通常のアプリのフォルダー（System32 等）を無駄に走査しないよう、
+  //    VSCode らしい構成（bin\ か resources\ がある）のときだけ走査する。
+  if (binEntries || fs.existsSync(path.join(dir, 'resources'))) {
+    try {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (ent.isDirectory() && /^[0-9a-f]{7,}$/i.test(ent.name)) {
+          const cli = path.join(dir, ent.name, 'resources', 'app', 'out', 'cli.js');
+          if (fs.existsSync(cli)) return cli;
+        }
+      }
+    } catch {
+      // 読めなければ諦める（通常起動にフォールバック）
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 子プロセスを detached で起動し、失敗時のみ通知する。
+ * ※ windowsHide は付けない。これは STARTUPINFO に SW_HIDE を渡すため、
+ *   メモ帳など多くのデスクトップ GUI アプリのウィンドウが表示されなくなる。
+ */
+function spawnDetached(command, args, env) {
+  const child = cp.spawn(command, args, { detached: true, stdio: 'ignore', env });
   child.on('error', (err) => {
     vscode.window.showErrorMessage(vscode.l10n.t('Failed to launch the application: {0}', err.message));
   });
   child.unref();
+}
+
+/** 実行ファイル（exe 等）でファイルを起動 */
+function launchExe(appPath, filePath) {
+  const env = sanitizedEnv();
+  const cliJs = isWin ? findVscodeCliJs(appPath) : undefined;
+  if (cliJs) {
+    // VSCode 系: Code.exe に cli.js を渡し、ELECTRON_RUN_AS_NODE=1 で CLI として実行させる
+    env.ELECTRON_RUN_AS_NODE = '1';
+    spawnDetached(appPath, [cliJs, filePath], env);
+  } else {
+    spawnDetached(appPath, [filePath], env);
+  }
 }
 
 /** AUMID らしくない（＝実在する実行ファイルのパス）かどうか */
@@ -221,12 +290,62 @@ function looksLikeExePath(target) {
   return /[\\/]/.test(target) && fs.existsSync(target) && !isDirectory(target);
 }
 
+/**
+ * インストール済みアプリ（Get-StartApps の AppID）の実行ファイルパスを解決する。
+ * VSCode などのデスクトップアプリは AppsFolder 経由で実行ファイルを取得でき、解決できれば
+ * exe として起動する。本物のパッケージ（UWP）アプリは解決できず undefined を返す。
+ */
+// 解決結果はセッション中変わらないのでメモ化する（複数ファイル選択時に PowerShell を毎回起動しない）
+const installedAppExeCache = new Map();
+
+function resolveInstalledAppExe(appId) {
+  if (installedAppExeCache.has(appId)) {
+    return Promise.resolve(installedAppExeCache.get(appId));
+  }
+  // AppID は環境変数経由で渡し、PowerShell へのコード差し込みを避ける
+  const script =
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;" +
+    "$id=$env:OWA_APPID;" +
+    "$item=(New-Object -ComObject Shell.Application).NameSpace('shell:AppsFolder').Items()" +
+    " | Where-Object { $_.Path -eq $id } | Select-Object -First 1;" +
+    "if ($item) { $t=$item.ExtendedProperty('System.Link.TargetParsingPath'); if ($t) { Write-Output $t } }";
+  return new Promise((resolve) => {
+    cp.execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, maxBuffer: 1024 * 1024, env: { ...process.env, OWA_APPID: appId } },
+      (err, stdout) => {
+        const p = err ? '' : (stdout || '').trim();
+        const result = p && fs.existsSync(p) && !isDirectory(p) ? p : undefined;
+        installedAppExeCache.set(appId, result);
+        resolve(result);
+      }
+    );
+  });
+}
+
 /** ストアアプリ（AUMID）でファイルを起動。失敗時はエラーを通知する */
-function launchStore(aumid, filePath) {
-  // Get-StartApps はデスクトップアプリを実行ファイルのパスとして返すことがある。
-  // その場合 AUMID として起動すると ArgumentException になるため、exe として起動する。
+async function launchStore(aumid, filePath) {
+  // 実行ファイルのパスがそのまま保存されている場合（旧データなど）は exe として起動
   if (looksLikeExePath(aumid)) {
     launchExe(aumid, filePath);
+    return;
+  }
+  // Get-StartApps のデスクトップアプリ（VSCode 等）は実行ファイルを解決して exe として起動する。
+  // UWP アクティベーション API では起動できず ArgumentException になるため。
+  const resolvedExe = await resolveInstalledAppExe(aumid);
+  if (resolvedExe) {
+    launchExe(resolvedExe, filePath);
+    return;
+  }
+  // UWP（パッケージ）アプリの AUMID は "PackageFamilyName!AppId" の形で "!" を含む。
+  // "!" が無いのに実行ファイルを特定できなかった＝デスクトップアプリだが解決に失敗した
+  // （COM がポリシーでブロックされている環境など）。専用 API では起動できないので、
+  // 実行ファイルを選び直すよう分かりやすく案内する。
+  if (!aumid.includes('!')) {
+    vscode.window.showErrorMessage(
+      vscode.l10n.t('Could not determine how to launch "{0}". Please use "Select an executable..." and choose the app .exe instead.', aumid)
+    );
     return;
   }
   let scriptPath;
@@ -260,10 +379,10 @@ function launchStore(aumid, filePath) {
 }
 
 /** 関連付けエントリでファイルを開く */
-function launchEntry(entry, filePath) {
+async function launchEntry(entry, filePath) {
   try {
     if (entry.kind === 'store') {
-      launchStore(entry.target, filePath);
+      await launchStore(entry.target, filePath);
     } else {
       launchExe(entry.target, filePath);
     }
@@ -393,7 +512,7 @@ async function openFiles(context, targets, forcePick) {
       }
     }
 
-    launchEntry(entry, filePath);
+    await launchEntry(entry, filePath);
   }
 }
 
