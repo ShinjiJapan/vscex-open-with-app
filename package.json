@@ -9,7 +9,7 @@
     "url": "https://github.com/ShinjiJapan/vscex-open-with-app"
   },
   "license": "MIT",
-  "version": "1.1.1",
+  "version": "1.1.3",
   "l10n": "./l10n",
   "engines": {
     "vscode": "^1.75.0"

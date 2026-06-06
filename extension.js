@@ -95,6 +95,8 @@ function ensureStoreLauncherScript() {
   [Parameter(Mandatory=$true)][string]$FilePath
 )
 $ErrorActionPreference = 'Stop'
+# エラーメッセージが Node 側で文字化けしないよう、出力を UTF-8 に揃える
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $source = @'
 using System;
 using System.Runtime.InteropServices;
@@ -167,8 +169,37 @@ public static class StoreLauncher {
     }
 }
 '@
-Add-Type -TypeDefinition $source -Language CSharp
-[StoreLauncher]::Open($Aumid, $FilePath) | Out-Null
+# Get-StartApps の一覧にはデスクトップアプリも含まれる。それらは UWP の
+# アクティベーション API では起動できず ArgumentException になる。AppsFolder から
+# 実行ファイルのパスを解決できればそのまま起動し、無ければ UWP として起動する。
+function Resolve-AppExe([string]$appId) {
+  try {
+    $shell = New-Object -ComObject Shell.Application
+    $item = $shell.NameSpace('shell:AppsFolder').Items() | Where-Object { $_.Path -eq $appId } | Select-Object -First 1
+    if ($item) {
+      $target = $item.ExtendedProperty('System.Link.TargetParsingPath')
+      if ($target -and (Test-Path -LiteralPath $target -PathType Leaf)) { return $target }
+    }
+  } catch {}
+  return $null
+}
+try {
+  $exe = Resolve-AppExe $Aumid
+  if ($exe) {
+    # デスクトップアプリ: 実行ファイルにパスを渡して起動
+    Start-Process -FilePath $exe -ArgumentList ('"' + $FilePath + '"')
+  } else {
+    # パッケージ（UWP/ストア）アプリ: 専用 API でファイルを渡して起動
+    Add-Type -TypeDefinition $source -Language CSharp
+    [StoreLauncher]::Open($Aumid, $FilePath) | Out-Null
+  }
+} catch {
+  # .NET 例外（COM の ArgumentException など）はネストしているので一番内側を表示する
+  $ex = $_.Exception
+  while ($ex.InnerException) { $ex = $ex.InnerException }
+  [Console]::Error.WriteLine($ex.Message)
+  exit 1
+}
 `;
   // Windows PowerShell 5.1 は BOM 無し .ps1 を ANSI(Shift-JIS) として読むため、
   // 日本語コメントが化けて C# のコンパイルに失敗する。UTF-8 BOM 付きで書き出す。
@@ -185,8 +216,19 @@ function launchExe(appPath, filePath) {
   child.unref();
 }
 
+/** AUMID らしくない（＝実在する実行ファイルのパス）かどうか */
+function looksLikeExePath(target) {
+  return /[\\/]/.test(target) && fs.existsSync(target) && !isDirectory(target);
+}
+
 /** ストアアプリ（AUMID）でファイルを起動。失敗時はエラーを通知する */
 function launchStore(aumid, filePath) {
+  // Get-StartApps はデスクトップアプリを実行ファイルのパスとして返すことがある。
+  // その場合 AUMID として起動すると ArgumentException になるため、exe として起動する。
+  if (looksLikeExePath(aumid)) {
+    launchExe(aumid, filePath);
+    return;
+  }
   let scriptPath;
   try {
     scriptPath = ensureStoreLauncherScript();
