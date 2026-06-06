@@ -2,14 +2,30 @@
   "name": "open-with-app",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.2.1",
+  "publisher": "shinjijapan",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ShinjiJapan/vscex-open-with-app"
+  },
+  "license": "MIT",
+  "version": "1.0.0",
   "l10n": "./l10n",
-  "publisher": "local",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "open with",
+    "external application",
+    "explorer context menu",
+    "file association",
+    "default application",
+    "launch app",
+    "store app",
+    "windows"
   ],
   "main": "./extension.js",
   "activationEvents": [],

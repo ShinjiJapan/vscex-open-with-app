@@ -2,3 +2,4 @@
 *.vsix
 **/*.md
 !README.md
+.gitignore
