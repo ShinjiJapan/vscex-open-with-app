@@ -1,6 +1,6 @@
 {
   "extension.displayName": "Open With App",
-  "extension.description": "Open files with an application remembered per file extension, from the Explorer context menu.",
+  "extension.description": "Open files and folders with an application remembered per file extension (or for folders), from the Explorer context menu.",
   "openWithApp.open.title": "Open With Specified Application",
   "openWithApp.openWith.title": "Open With Another Application...",
   "openWithApp.manage.title": "Open With App: Manage Extension Associations"

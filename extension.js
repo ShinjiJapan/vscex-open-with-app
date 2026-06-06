@@ -7,6 +7,9 @@ const fs = require('fs');
 const STORE_KEY = 'extensionAppAssociations';
 const isWin = process.platform === 'win32';
 
+// フォルダはすべて同じ関連付け（1つのアプリ）で開けるよう、共通のキーで記憶する。
+const FOLDER_KEY = '<folder>';
+
 /** @returns {Record<string, any>} 拡張子 -> 関連付け の対応表 */
 function getAssociations(context) {
   return context.globalState.get(STORE_KEY, {});
@@ -30,11 +33,24 @@ function normalizeEntry(value) {
   return value;
 }
 
+/** パスがディレクトリかどうか。判定できなければ false。 */
+function isDirectory(filePath) {
+  try {
+    return fs.statSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * 関連付けのキー。拡張子があれば小文字の拡張子（例: ".pdf"）、
+ * 関連付けのキー。
+ * フォルダはすべて共通キー（FOLDER_KEY）、
+ * ファイルは拡張子があれば小文字の拡張子（例: ".pdf"）、
  * なければファイル名そのもの（例: "dockerfile"）。
+ * ※ フォルダ名に "." が含まれても拡張子扱いしないよう、先にディレクトリ判定する。
  */
 function extKeyFor(filePath) {
+  if (isDirectory(filePath)) return FOLDER_KEY;
   const ext = path.extname(filePath).toLowerCase();
   return ext || path.basename(filePath).toLowerCase();
 }

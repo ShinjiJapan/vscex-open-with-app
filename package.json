@@ -9,7 +9,7 @@
     "url": "https://github.com/ShinjiJapan/vscex-open-with-app"
   },
   "license": "MIT",
-  "version": "1.0.1",
+  "version": "1.1.1",
   "l10n": "./l10n",
   "engines": {
     "vscode": "^1.75.0"
@@ -48,13 +48,11 @@
       "explorer/context": [
         {
           "command": "openWithApp.open",
-          "group": "openWithApp@1",
-          "when": "!explorerResourceIsFolder"
+          "group": "openWithApp@1"
         },
         {
           "command": "openWithApp.openWith",
-          "group": "openWithApp@2",
-          "when": "!explorerResourceIsFolder"
+          "group": "openWithApp@2"
         }
       ],
       "commandPalette": [
