@@ -1,0 +1,60 @@
+{
+  "name": "open-with-app",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.2.1",
+  "l10n": "./l10n",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "openWithApp.open",
+        "title": "%openWithApp.open.title%"
+      },
+      {
+        "command": "openWithApp.openWith",
+        "title": "%openWithApp.openWith.title%"
+      },
+      {
+        "command": "openWithApp.manage",
+        "title": "%openWithApp.manage.title%"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "openWithApp.open",
+          "group": "openWithApp@1",
+          "when": "!explorerResourceIsFolder"
+        },
+        {
+          "command": "openWithApp.openWith",
+          "group": "openWithApp@2",
+          "when": "!explorerResourceIsFolder"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "openWithApp.open",
+          "when": "false"
+        },
+        {
+          "command": "openWithApp.openWith",
+          "when": "false"
+        },
+        {
+          "command": "openWithApp.manage",
+          "when": "true"
+        }
+      ]
+    }
+  }
+}

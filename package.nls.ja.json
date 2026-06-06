@@ -1,0 +1,7 @@
+{
+  "extension.displayName": "Open With App",
+  "extension.description": "エクスプローラーの右クリックメニューから、拡張子ごとに記憶したアプリケーションでファイルを開きます。",
+  "openWithApp.open.title": "指定したアプリケーションで開く",
+  "openWithApp.openWith.title": "別のアプリケーションで開く...",
+  "openWithApp.manage.title": "Open With App: 拡張子とアプリの関連付けを管理"
+}
