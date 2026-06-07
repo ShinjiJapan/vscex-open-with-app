@@ -1,6 +1,5 @@
 const vscode = require('vscode');
 const path = require('path');
-const os = require('os');
 const cp = require('child_process');
 const fs = require('fs');
 
@@ -88,180 +87,18 @@ async function listStartApps() {
 }
 
 /**
- * ストアアプリ（UWP/パッケージアプリ）でファイルを開くための一時 .ps1 を用意する。
- * 生成されるスクリプトは 2 段構え:
- *   1) AUMID に対応するファイル種別 ProgID を見つけられたら、Windows の「プログラムから開く」と
- *      同じ ShellExecuteEx（Windows.File コントラクト）で開く。単一インスタンスのアプリでも
- *      既存ウィンドウを保持できる。
- *   2) 見つからない場合（フォルダー等）は従来どおり UWP アクティベーション API で開く。
+ * 同梱のヘルパー実行ファイル OpenWithAppHost.exe のパスを返す。
+ * ストアアプリのアクティベーションを PowerShell など「コンソールホスト」と判定される
+ * プロセスから行うと、単一インスタンスのビューア（例: SkimDown）が自分自身を再起動し、
+ * すでに開いているウィンドウが新しく開いたファイルに切り替わらない（再起動の過程で
+ * 正規の Windows.File アクティベーションがコマンドライン渡しに化けるため）。中立な名前の
+ * このヘルパーから起動すると再起動が起きず、エクスプローラーの「プログラムから開く」と
+ * 同じく、既存ウィンドウを保ったまま表示ファイルが切り替わる。
+ *
+ * ヘルパーのソースと再ビルド手順は host/OpenWithAppHost.cs / host/build.ps1 を参照。
  */
-function ensureStoreLauncherScript() {
-  const scriptPath = path.join(os.tmpdir(), 'open-with-app-store-launch.ps1');
-  const content = `param(
-  [Parameter(Mandatory=$true)][string]$Aumid,
-  [Parameter(Mandatory=$true)][string]$FilePath
-)
-$ErrorActionPreference = 'Stop'
-# エラーメッセージが Node 側で文字化けしないよう、出力を UTF-8 に揃える
-try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-
-# まず Windows の「プログラムから開く」と同じ正規のファイルアクティベーション
-# （ShellExecuteEx + ファイル種別 ProgID / Windows.File コントラクト）で開けないか試す。
-# IApplicationActivationManager.ActivateForFile は単一インスタンスのアプリ（例: SkimDown）で
-# 既存インスタンスを終了させて開き直すため、開いていたウィンドウが全部閉じてしまう。
-# シェル経由なら既存インスタンスを保持したまま開ける（＝エクスプローラーの「プログラムから開く」と同じ）。
-function Resolve-ProgId([string]$aumid, [string]$path) {
-  if ([System.IO.Directory]::Exists($path)) { return $null }   # フォルダーは拡張子 ProgID を持たない
-  $ext = [System.IO.Path]::GetExtension($path)
-  if ([string]::IsNullOrEmpty($ext)) { return $null }          # 拡張子なしも対象外
-  $candidates = New-Object System.Collections.Generic.List[string]
-  foreach ($root in @("Registry::HKEY_CLASSES_ROOT\\$ext\\OpenWithProgids", "HKCU:\\Software\\Classes\\$ext\\OpenWithProgids")) {
-    if (Test-Path $root) {
-      foreach ($n in (Get-Item $root).Property) { if ($n -and -not $candidates.Contains($n)) { $candidates.Add($n) } }
-    }
-  }
-  foreach ($cand in $candidates) {
-    $k = "Registry::HKEY_CLASSES_ROOT\\$cand\\shell\\open"
-    if (Test-Path $k) {
-      $a = (Get-ItemProperty $k -ErrorAction SilentlyContinue).AppUserModelID
-      if ($a -and ($a -ieq $aumid)) { return $cand }
-    }
-  }
-  return $null
-}
-
-$progId = Resolve-ProgId $Aumid $FilePath
-if ($progId) {
-  Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class ShellOpener {
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct SHELLEXECUTEINFO {
-        public int cbSize; public uint fMask; public IntPtr hwnd;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpVerb;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpFile;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpParameters;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpDirectory;
-        public int nShow; public IntPtr hInstApp; public IntPtr lpIDList;
-        [MarshalAs(UnmanagedType.LPWStr)] public string lpClass;
-        public IntPtr hkeyClass; public uint dwHotKey; public IntPtr hIcon; public IntPtr hProcess;
-    }
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool ShellExecuteExW(ref SHELLEXECUTEINFO info);
-    // SEE_MASK_CLASSNAME(0x1): lpClass を ProgID として使い、その shell\\open\\command
-    // （= Windows.File コントラクトの DelegateExecute）でファイルを開く。
-    public static void Open(string progId, string file) {
-        var s = new SHELLEXECUTEINFO();
-        s.cbSize = Marshal.SizeOf(s);
-        s.fMask = 0x00000001;
-        s.lpClass = progId; s.lpVerb = "open"; s.lpFile = file; s.nShow = 1;
-        if (!ShellExecuteExW(ref s)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-    }
-}
-'@
-  try {
-    [ShellOpener]::Open($progId, $FilePath)
-    exit 0
-  } catch {
-    $ex = $_.Exception
-    while ($ex.InnerException) { $ex = $ex.InnerException }
-    [Console]::Error.WriteLine($ex.Message)
-    exit 1
-  }
-}
-
-# フォールバック: ProgID が見つからない（フォルダー、またはファイル関連付けの無いアプリ）場合は
-# 従来どおり UWP アクティベーション API で開く。
-$source = @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class StoreLauncher {
-    [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IShellItem {
-        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
-        void GetParent(out IShellItem ppsi);
-        void GetDisplayName(int sigdnName, out IntPtr ppszName);
-        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
-        void Compare(IShellItem psi, uint hint, out int piOrder);
-    }
-
-    [ComImport, Guid("b63ea76d-1f85-456f-a19c-48159efa858b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IShellItemArray { }
-
-    [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IApplicationActivationManager {
-        int ActivateApplication(string appUserModelId, string arguments, int options, out uint processId);
-        int ActivateForFile(string appUserModelId, IShellItemArray itemArray, string verb, out uint processId);
-        int ActivateForProtocol(string appUserModelId, IShellItemArray itemArray, out uint processId);
-    }
-
-    [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
-    class ApplicationActivationManager { }
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
-    static extern void SHCreateItemFromParsingName(
-        string pszPath, IntPtr pbc, ref Guid riid,
-        [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
-
-    [DllImport("shell32.dll", PreserveSig = false)]
-    static extern void SHCreateShellItemArrayFromShellItem(
-        IShellItem psi, ref Guid riid,
-        [MarshalAs(UnmanagedType.Interface)] out IShellItemArray ppv);
-
-    static Guid IID_IShellItem = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
-    static Guid IID_IShellItemArray = new Guid("b63ea76d-1f85-456f-a19c-48159efa858b");
-
-    // 拡張子を登録しているアプリ向けの正式なファイル起動
-    static uint ActivateForFile(string aumid, string filePath) {
-        IShellItem item;
-        SHCreateItemFromParsingName(filePath, IntPtr.Zero, ref IID_IShellItem, out item);
-        IShellItemArray array;
-        SHCreateShellItemArrayFromShellItem(item, ref IID_IShellItemArray, out array);
-        var mgr = (IApplicationActivationManager)(new ApplicationActivationManager());
-        uint pid;
-        int hr = mgr.ActivateForFile(aumid, array, null, out pid);
-        if (hr != 0) throw new Exception("ActivateForFile failed: 0x" + hr.ToString("X8"));
-        return pid;
-    }
-
-    // ファイルパスを起動引数として渡す汎用フォールバック
-    static uint ActivateApp(string aumid, string filePath) {
-        var mgr = (IApplicationActivationManager)(new ApplicationActivationManager());
-        uint pid;
-        int hr = mgr.ActivateApplication(aumid, filePath, 0, out pid);
-        if (hr != 0) throw new Exception("ActivateApplication failed: 0x" + hr.ToString("X8"));
-        return pid;
-    }
-
-    public static uint Open(string aumid, string filePath) {
-        try {
-            return ActivateForFile(aumid, filePath);
-        } catch {
-            // 拡張子未登録などで ForFile が失敗した場合は引数渡しで起動
-            return ActivateApp(aumid, filePath);
-        }
-    }
-}
-'@
-# このスクリプトはパッケージ（UWP/ストア）アプリ専用。
-# デスクトップアプリは拡張機能側で実行ファイルを解決して起動するため、ここには来ない。
-try {
-  Add-Type -TypeDefinition $source -Language CSharp
-  [StoreLauncher]::Open($Aumid, $FilePath) | Out-Null
-} catch {
-  # .NET 例外（COM の ArgumentException など）はネストしているので一番内側を表示する
-  $ex = $_.Exception
-  while ($ex.InnerException) { $ex = $ex.InnerException }
-  [Console]::Error.WriteLine($ex.Message)
-  exit 1
-}
-`;
-  // Windows PowerShell 5.1 は BOM 無し .ps1 を ANSI(Shift-JIS) として読むため、
-  // 日本語コメントが化けて C# のコンパイルに失敗する。UTF-8 BOM 付きで書き出す。
-  fs.writeFileSync(scriptPath, '﻿' + content, 'utf8');
-  return scriptPath;
+function getStoreLauncherExe() {
+  return path.join(__dirname, 'host', 'OpenWithAppHost.exe');
 }
 
 /**
@@ -424,26 +261,20 @@ async function launchStore(aumid, filePath) {
     );
     return;
   }
-  let scriptPath;
-  try {
-    scriptPath = ensureStoreLauncherScript();
-  } catch (err) {
-    vscode.window.showErrorMessage(vscode.l10n.t('Failed to prepare the Store app launch script: {0}', err.message));
+  // パッケージ（UWP/ストア）アプリは同梱のヘルパー OpenWithAppHost.exe で開く。
+  // PowerShell から開くと SkimDown 等が「コンソールホストから起動された」と判定して
+  // 自分自身を再起動し、既に開いているウィンドウが新しいファイルに切り替わらないため、
+  // 中立な名前のこのヘルパーを使う（エクスプローラーの「プログラムから開く」と同じ挙動になる）。
+  const launcher = getStoreLauncherExe();
+  if (!fs.existsSync(launcher)) {
+    vscode.window.showErrorMessage(vscode.l10n.t('The launcher helper was not found: {0}', launcher));
     return;
   }
-  // PowerShell プロセスはアクティベート後すぐ終了する（アプリ本体は独立して動く）。
+  // ヘルパーはアクティベーションをシェルへ委譲後すぐ終了する（アプリ本体は独立して動く）。
   // 結果を受け取ってエラーを握り潰さないよう execFile を使う。
   cp.execFile(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-STA',
-      '-ExecutionPolicy', 'Bypass',
-      '-File', scriptPath,
-      '-Aumid', aumid,
-      '-FilePath', filePath,
-    ],
+    launcher,
+    [aumid, filePath],
     { windowsHide: true, maxBuffer: 1024 * 1024 },
     (err, _stdout, stderr) => {
       if (err) {

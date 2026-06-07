@@ -1,6 +1,6 @@
 {
   "Failed to launch the application: {0}": "アプリの起動に失敗しました: {0}",
-  "Failed to prepare the Store app launch script: {0}": "ストアアプリ起動スクリプトの準備に失敗しました: {0}",
+  "The launcher helper was not found: {0}": "起動ヘルパーが見つかりませんでした: {0}",
   "Failed to launch the Store app: {0}": "ストアアプリの起動に失敗しました: {0}",
   "Could not determine how to launch \"{0}\". Please use \"Select an executable...\" and choose the app .exe instead.": "「{0}」の起動方法を判別できませんでした。「実行ファイルを選択...」からアプリの .exe を選んでください。",
   "Failed to launch: {0}": "起動に失敗しました: {0}",

@@ -47,11 +47,34 @@ VSCode の表示言語に合わせて、メニューラベルもダイアログ/
 
 ## ストアアプリ対応について
 
-ストアアプリ（UWP）は実行ファイルのパスを直接指定できないため、Windows の
-`IApplicationActivationManager.ActivateForFile`（COM）経由でファイルを渡して起動します。
-内部的に一時 PowerShell スクリプトを利用します（Windows のみ）。
+ストアアプリ（UWP/パッケージアプリ）は実行ファイルのパスを直接指定できないため、同梱の
+ヘルパー実行ファイル **`host/OpenWithAppHost.exe`** 経由でファイルを開きます（Windows のみ）。
 
-インストール済みアプリの一覧は `Get-StartApps` から取得しています。
+ヘルパーは、拡張子に対応する ProgID が見つかれば `ShellExecuteEx`（Windows.File コントラクト）で
+開き、見つからなければ（フォルダー等）`IApplicationActivationManager` で起動します。
+
+### なぜ専用ヘルパーが必要か
+
+`powershell.exe` から直接アクティベートすると、単一インスタンスのビューア（例: SkimDown）が
+「コンソールホストから起動された」と判定して自分自身を再起動し、その過程で正規の
+Windows.File アクティベーションがコマンドライン渡しに化けます。すると、すでに開いている
+ウィンドウが新しく開いたファイルに**切り替わりません**。`powershell.exe` 等の既知のコンソール
+ホスト名**以外**の中立な名前のプロセスから起動すれば再起動が起きず、エクスプローラーの
+「プログラムから開く」と同じく、既存ウィンドウを保ったまま表示ファイルが切り替わります。
+（`powershell.exe` をリネームして使う手は AV/EDR にマルウェアの常套手段として検知されるため
+採用していません。）
+
+### ヘルパーのビルド
+
+ソースは `host/OpenWithAppHost.cs`。Windows 同梱の .NET Framework C# コンパイラでビルドします
+（外部 SDK 不要）。`host/OpenWithAppHost.exe` は VSIX に同梱するため、ソース変更後はビルドして
+コミットしてください。
+
+```powershell
+host\build.ps1
+```
+
+インストール済みアプリの一覧は `Get-StartApps` から取得しています（PowerShell 経由）。
 
 ## データの保存先
 

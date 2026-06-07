@@ -1,7 +1,10 @@
 .vscode/**
 .claude/**
+.serena/**
 _local/**
 *.vsix
 **/*.md
 !README.md
 .gitignore
+host/*.cs
+host/*.ps1
