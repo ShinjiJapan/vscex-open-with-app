@@ -1,5 +1,6 @@
 .vscode/**
 .claude/**
+_local/**
 *.vsix
 **/*.md
 !README.md

@@ -87,7 +87,14 @@ async function listStartApps() {
   return parsed.filter((a) => a && a.AppID);
 }
 
-/** ストアアプリ（UWP）を AppUserModelID 経由でファイル付きで起動するための一時 .ps1 を用意 */
+/**
+ * ストアアプリ（UWP/パッケージアプリ）でファイルを開くための一時 .ps1 を用意する。
+ * 生成されるスクリプトは 2 段構え:
+ *   1) AUMID に対応するファイル種別 ProgID を見つけられたら、Windows の「プログラムから開く」と
+ *      同じ ShellExecuteEx（Windows.File コントラクト）で開く。単一インスタンスのアプリでも
+ *      既存ウィンドウを保持できる。
+ *   2) 見つからない場合（フォルダー等）は従来どおり UWP アクティベーション API で開く。
+ */
 function ensureStoreLauncherScript() {
   const scriptPath = path.join(os.tmpdir(), 'open-with-app-store-launch.ps1');
   const content = `param(
@@ -97,6 +104,75 @@ function ensureStoreLauncherScript() {
 $ErrorActionPreference = 'Stop'
 # エラーメッセージが Node 側で文字化けしないよう、出力を UTF-8 に揃える
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
+# まず Windows の「プログラムから開く」と同じ正規のファイルアクティベーション
+# （ShellExecuteEx + ファイル種別 ProgID / Windows.File コントラクト）で開けないか試す。
+# IApplicationActivationManager.ActivateForFile は単一インスタンスのアプリ（例: SkimDown）で
+# 既存インスタンスを終了させて開き直すため、開いていたウィンドウが全部閉じてしまう。
+# シェル経由なら既存インスタンスを保持したまま開ける（＝エクスプローラーの「プログラムから開く」と同じ）。
+function Resolve-ProgId([string]$aumid, [string]$path) {
+  if ([System.IO.Directory]::Exists($path)) { return $null }   # フォルダーは拡張子 ProgID を持たない
+  $ext = [System.IO.Path]::GetExtension($path)
+  if ([string]::IsNullOrEmpty($ext)) { return $null }          # 拡張子なしも対象外
+  $candidates = New-Object System.Collections.Generic.List[string]
+  foreach ($root in @("Registry::HKEY_CLASSES_ROOT\\$ext\\OpenWithProgids", "HKCU:\\Software\\Classes\\$ext\\OpenWithProgids")) {
+    if (Test-Path $root) {
+      foreach ($n in (Get-Item $root).Property) { if ($n -and -not $candidates.Contains($n)) { $candidates.Add($n) } }
+    }
+  }
+  foreach ($cand in $candidates) {
+    $k = "Registry::HKEY_CLASSES_ROOT\\$cand\\shell\\open"
+    if (Test-Path $k) {
+      $a = (Get-ItemProperty $k -ErrorAction SilentlyContinue).AppUserModelID
+      if ($a -and ($a -ieq $aumid)) { return $cand }
+    }
+  }
+  return $null
+}
+
+$progId = Resolve-ProgId $Aumid $FilePath
+if ($progId) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ShellOpener {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct SHELLEXECUTEINFO {
+        public int cbSize; public uint fMask; public IntPtr hwnd;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpVerb;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpFile;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpParameters;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpDirectory;
+        public int nShow; public IntPtr hInstApp; public IntPtr lpIDList;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpClass;
+        public IntPtr hkeyClass; public uint dwHotKey; public IntPtr hIcon; public IntPtr hProcess;
+    }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ShellExecuteExW(ref SHELLEXECUTEINFO info);
+    // SEE_MASK_CLASSNAME(0x1): lpClass を ProgID として使い、その shell\\open\\command
+    // （= Windows.File コントラクトの DelegateExecute）でファイルを開く。
+    public static void Open(string progId, string file) {
+        var s = new SHELLEXECUTEINFO();
+        s.cbSize = Marshal.SizeOf(s);
+        s.fMask = 0x00000001;
+        s.lpClass = progId; s.lpVerb = "open"; s.lpFile = file; s.nShow = 1;
+        if (!ShellExecuteExW(ref s)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
+}
+'@
+  try {
+    [ShellOpener]::Open($progId, $FilePath)
+    exit 0
+  } catch {
+    $ex = $_.Exception
+    while ($ex.InnerException) { $ex = $ex.InnerException }
+    [Console]::Error.WriteLine($ex.Message)
+    exit 1
+  }
+}
+
+# フォールバック: ProgID が見つからない（フォルダー、またはファイル関連付けの無いアプリ）場合は
+# 従来どおり UWP アクティベーション API で開く。
 $source = @'
 using System;
 using System.Runtime.InteropServices;
